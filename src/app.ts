@@ -1,128 +1,41 @@
 import { z } from "zod";
 import { generateText, generateStructured, type AIMessage } from "@/ai";
+import type { Item, NPC, Weather, GameTime, Player, GameWorld, GameState, GameHistory } from "@/types";
+import { gameWorld, initialTime, initialWeather, initialPlayer } from "@/game/initialData";
+import { rollD20, formatInBox } from "@/utils";
+import * as readline from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
 
-// Интерфейсы для инвентаря и предметов
-interface Item {
-  id: string;
-  name: string;
-  description: string;
-  type: "weapon" | "armor" | "potion" | "key" | "misc";
-  properties?: {
-    damage?: number;
-    defense?: number;
-    healing?: number;
-    effects?: string[];
-  };
-  quantity: number;
-}
+// --- Schemas ---
 
-// Интерфейс для NPC (персонажей и существ)
-interface NPC {
-  id: string;
-  name: string;
-  type: "human" | "animal" | "monster" | "other";
-  age?: number;
-  gender?: "male" | "female" | "unknown" | "other";
-  description: string;
-  personality: string;
-  background: string;
-  intentions: string;
-  inventory?: Item[];
-  health?: number;
-  maxHealth?: number;
-  isHostile: boolean;
-}
-
-// Интерфейс для погодных условий
-interface Weather {
-  current: string; // Например: "солнечно", "дождливо", "снег", и т.д.
-  temperature: number; // Температура в Цельсиях
-  effects: string[]; // Эффекты погоды на игровой процесс
-}
-
-// Интерфейс для времени
-interface GameTime {
-  minute: number;
-  hour: number;
-  day: number;
-  month: number;
-  year: number;
-  dayTime: "утро" | "день" | "вечер" | "ночь";
-  totalMinutes: number; // Общее количество игровых минут, прошедших с начала игры
-}
-
-// Интерфейс для состояния героя
-interface Player {
-  name: string;
-  gender: string;
-  age: number;
-  background: string;
-  health: number;
-  maxHealth: number;
-  inventory: Item[];
-  abilities: string[];
-  gold: number;
-}
-
-// Интерфейс для игрового мира
-interface GameWorld {
-  name: string;
-  description: string;
-  rules: string;
-  setting: string;
-  mainStoryline: string;
-}
-
-// Расширенный интерфейс для игрового состояния
-interface GameState {
-  scene: string;
-  location: {
-    name: string;
-    description: string;
-    terrain: string;
-  };
-  weather: Weather;
-  time: GameTime;
-  player: Player;
-  world: GameWorld;
-  npcsPresent: NPC[];
-  options: Array<{
-    id: string;
-    text: string;
-    consequence: string;
-    timeChange?: number; // Минуты, которые пройдут при выборе этого варианта
-    goldChange?: number; // Изменение количества золота: положительное - получение, отрицательное - трата
-  }>;
-}
-
-// Схема валидации для структурированного ответа
+// Schema for basic game state updates
 const GameStateSchema = z.object({
-  scene: z.string(),
+  scene: z.string().describe("Описание текущей сцены и происходящего."),
   location: z.object({
-    name: z.string(),
-    description: z.string(),
-    terrain: z.string()
-  }).optional(), // Опционально для обратной совместимости
+    name: z.string().describe("Название текущего места."),
+    description: z.string().describe("Описание текущего места."),
+    terrain: z.string().describe("Тип местности (лес, город, подземелье и т.д.).")
+  }).optional().describe("Информация о текущей локации."),
   weather: z.object({
-    current: z.string(),
-    temperature: z.number(),
-    effects: z.array(z.string())
-  }).optional(),
+    current: z.string().describe("Текущие погодные условия (солнечно, дождь и т.д.)."),
+    temperature: z.number().describe("Температура в градусах Цельсия."),
+    effects: z.array(z.string()).describe("Игровые эффекты погоды (скользко, плохая видимость и т.д.).")
+  }).optional().describe("Информация о погоде."),
   time: z.object({
     minute: z.number(),
     hour: z.number(),
     day: z.number(),
     month: z.number(),
     year: z.number(),
-    dayTime: z.enum(['\u0443\u0442\u0440\u043e', '\u0434\u0435\u043d\u044c', '\u0432\u0435\u0447\u0435\u0440', '\u043d\u043e\u0447\u044c']),
+    dayTime: z.enum(['утро', 'день', 'вечер', 'ночь']),
     totalMinutes: z.number()
-  }).optional(),
+  }).optional().describe("Текущее игровое время."),
   player: z.object({
     name: z.string(),
     gender: z.string(),
     age: z.number(),
     background: z.string(),
-    health: z.number(),
+    health: z.number().describe("Текущее здоровье игрока."),
     maxHealth: z.number(),
     inventory: z.array(z.object({
       id: z.string(),
@@ -136,27 +49,27 @@ const GameStateSchema = z.object({
         effects: z.array(z.string()).optional()
       }).optional(),
       quantity: z.number()
-    })),
+    })).describe("Предметы в инвентаре игрока."),
     abilities: z.array(z.string()),
-    gold: z.number()
-  }).optional(),
+    gold: z.number().describe("Количество золота у игрока.")
+  }).optional().describe("Информация об игроке."),
   world: z.object({
     name: z.string(),
     description: z.string(),
     rules: z.string(),
     setting: z.string(),
     mainStoryline: z.string()
-  }).optional(),
+  }).optional().describe("Общая информация об игровом мире."),
   npcsPresent: z.array(z.object({
-    id: z.string(),
-    name: z.string(),
-    type: z.enum(['human', 'animal', 'monster', 'other']),
-    age: z.number().optional(),
-    gender: z.enum(['male', 'female', 'unknown', 'other']).optional(),
-    description: z.string(),
-    personality: z.string(),
-    background: z.string(),
-    intentions: z.string(),
+    id: z.string().describe("Уникальный ID NPC."),
+    name: z.string().describe("Имя NPC."),
+    type: z.enum(['human', 'animal', 'monster', 'other']).describe("Тип NPC."),
+    age: z.number().optional().describe("Возраст NPC."),
+    gender: z.enum(['male', 'female', 'unknown', 'other']).optional().describe("Пол NPC."),
+    description: z.string().describe("Внешнее описание NPC."),
+    personality: z.string().describe("Черты характера NPC."),
+    background: z.string().describe("Предыстория NPC."),
+    intentions: z.string().describe("Начальные намерения или цели NPC."),
     inventory: z.array(z.object({
       id: z.string(),
       name: z.string(),
@@ -169,600 +82,304 @@ const GameStateSchema = z.object({
         effects: z.array(z.string()).optional()
       }).optional(),
       quantity: z.number()
-    })).optional(),
+    })).optional().describe("Инвентарь NPC."),
     health: z.number().optional(),
     maxHealth: z.number().optional(),
-    isHostile: z.boolean()
-  })).optional(),
+    isHostile: z.boolean().describe("Враждебен ли NPC к игроку.")
+  })).optional().describe("NPC, находящиеся в текущей локации."),
   options: z.array(z.object({
-    id: z.string(),
-    text: z.string(),
-    consequence: z.string(),
-    timeChange: z.number().optional(),
-    goldChange: z.number().optional()
-  }))
+    id: z.string().describe("Уникальный идентификатор варианта."),
+    text: z.string().describe("Текст варианта действия для игрока."),
+    consequence: z.string().optional().describe("Краткое описание последствий для информации."),
+    timeChange: z.number().optional().describe("Изменение времени в минутах."),
+    goldChange: z.number().optional().describe("Изменение золота.")
+  })).describe("Варианты действий, доступные игроку.")
 });
 
-type GameHistory = Array<{
-  role: "user" | "assistant" | "system";
-  content: string;
-}>;
+// Schema for initial world and NPC generation
+const WorldGenerationSchema = z.object({
+  world: z.object({
+    name: z.string().describe("Название игрового мира."),
+    description: z.string().describe("Краткое общее описание мира."),
+    setting: z.string().describe("Описание сеттинга, атмосферы, ключевых мест или фракций."),
+    history: z.string().describe("Краткая история мира, важные события прошлого."),
+    mainStoryline: z.string().describe("Основной каркас сюжета, главная цель или конфликт.")
+  }).describe("Детали сгенерированного игрового мира."),
+  initialNpcs: z.array(z.object({
+    id: z.string().uuid().describe("Уникальный ID NPC в формате UUID."),
+    name: z.string().describe("Имя NPC."),
+    type: z.enum(['human', 'animal', 'monster', 'other']).describe("Тип NPC."),
+    age: z.number().optional().describe("Возраст NPC (если применимо)."),
+    gender: z.enum(['male', 'female', 'unknown', 'other']).optional().describe("Пол NPC (если применимо)."),
+    description: z.string().describe("Внешнее описание NPC."),
+    personality: z.string().describe("Основные черты характера NPC."),
+    background: z.string().describe("Краткая предыстория NPC."),
+    intentions: z.string().describe("Начальные намерения или цели NPC в данной сцене/игре."),
+    isHostile: z.boolean().default(false).describe("Враждебен ли NPC к игроку по умолчанию.")
+    // Начальный инвентарь можно добавить позже или генерировать отдельно
+  })).min(3).describe("Список из как минимум 3 ключевых стартовых NPC.")
+});
 
-// Начальная настройка игрового мира
-const gameWorld: GameWorld = {
-  name: "Эльдерхейм",
-  description: "Мир магии и древних легенд, где технологии соседствуют с волшебством, а древние расы борются за власть и выживание.",
-  rules: "Мир работает по законам низкого фэнтези. Магия существует, но редка. Существуют люди, эльфы, гномы и орки. Смерть персонажа окончательна. Выборы влияют на мир.",
-  setting: "Мир находится на грани войны. Империя людей расширяется, эльфийские королевства слабеют, подземные гномы накапливают богатства, а орки объединяются под новым лидером.",
-  mainStoryline: "Герой должен найти древний артефакт, способный предотвратить грядущую войну между расами и остановить древнее зло, пробуждающееся из-за растущего конфликта."
-};
+// --- Globals ---
 
-// Начальное время
-const initialTime: GameTime = {
-  minute: 0,
-  hour: 9, // Начало в 9 утра
-  day: 1,
-  month: 5, // Весна
-  year: 1247, // Год от основания Империи
-  dayTime: "утро",
-  totalMinutes: 0
-};
-
-// Начальная погода
-const initialWeather: Weather = {
-  current: "солнечно",
-  temperature: 18,
-  effects: ["хорошая видимость", "сухая земля", "лёгкий ветер"]
-};
-
-// Начальный игрок
-const initialPlayer: Player = {
-  name: "Альтаир",
-  gender: "мужской",
-  age: 27,
-  background: "Бывший солдат имперской армии, покинувший службу после того, как увидел сон о древнем артефакте.",
-  health: 100,
-  maxHealth: 100,
-  inventory: [
-    {
-      id: "sword",
-      name: "Стальной меч",
-      description: "Надёжный имперский меч, служивший вам много лет.",
-      type: "weapon",
-      properties: { damage: 10 },
-      quantity: 1
-    },
-    {
-      id: "healing_potion",
-      name: "Зелье лечения",
-      description: "Маленький флакон с красной жидкостью, заживляющей раны.",
-      type: "potion",
-      properties: { healing: 25 },
-      quantity: 2
-    },
-    {
-      id: "map",
-      name: "Карта региона",
-      description: "Потрёпанная карта окрестностей города Новомир.",
-      type: "misc",
-      quantity: 1
-    }
-  ],
-  abilities: ["владение мечом", "выносливость", "выживание"],
-  gold: 15
-};
-
-// Флаг для отслеживания завершения игры
 let isGameOver = false;
+const history: AIMessage[] = [];
+const rl = readline.createInterface({ input, output });
 
-// Функция для обновления времени в игре
-async function updateGameTime(state: GameState, minutesToAdd: number): Promise<void> {
-  if (!state.time) return;
-  
-  state.time.totalMinutes += minutesToAdd;
-  
-  // Обновляем минуты и часы
-  state.time.minute += minutesToAdd;
-  while (state.time.minute >= 60) {
-    state.time.minute -= 60;
-    state.time.hour += 1;
-  }
-  
-  // Обновляем день если нужно
-  while (state.time.hour >= 24) {
-    state.time.hour -= 24;
-    state.time.day += 1;
-  }
-  
-  // Обновляем месяц если нужно (упрощенно - 30 дней в месяце)
-  while (state.time.day > 30) {
-    state.time.day -= 30;
-    state.time.month += 1;
-  }
-  
-  // Обновляем год если нужно (12 месяцев в году)
-  while (state.time.month > 12) {
-    state.time.month -= 12;
-    state.time.year += 1;
-  }
-  
-  // Обновляем время суток
-  if (state.time.hour >= 5 && state.time.hour < 12) {
-    state.time.dayTime = 'утро';
-  } else if (state.time.hour >= 12 && state.time.hour < 18) {
-    state.time.dayTime = 'день';
-  } else if (state.time.hour >= 18 && state.time.hour < 22) {
-    state.time.dayTime = 'вечер';
-  } else {
-    state.time.dayTime = 'ночь';
+// --- Functions ---
+
+// Function to generate the initial world details and starting NPCs
+async function generateInitialWorldAndNPCs(): Promise<{ world: GameWorld; npcs: NPC[] }> {
+  console.log("⏳ Генерация мира и персонажей с помощью AI...");
+  // Modified Prompt with even stricter instructions:
+  const prompt = `Создай уникальный фэнтезийный мир для текстовой RPG. Включи название, краткое описание, сеттинг (атмосфера, ключевые места/фракции), краткую историю и основной сюжетный каркас. Также создай как минимум 3 уникальных стартовых NPC с именем, типом (human, animal, monster, other), описанием внешности, характером, предысторией и начальными намерениями. Задай каждому NPC уникальный UUID в поле id. По умолчанию isHostile = false. Формат ответа должен соответствовать JSON schema WorldGenerationSchema.\n\nКРАЙНЕ ВАЖНО: Следуй этим правилам НЕУКОСНИТЕЛЬНО:\n1.  ВСЕ поля, описанные в схеме, являются ОБЯЗАТЕЛЬНЫМИ, если явно не помечены как 'optional'. Поле 'world.mainStoryline' ОБЯЗАТЕЛЬНО должно присутствовать и содержать строку.\n2.  Поля 'world.setting' и 'world.history' должны быть простыми СТРОКАМИ текста, а не объектами.\n3.  Поле 'initialNpcs' ДОЛЖНО содержать массив из как минимум 3 объектов NPC.\n4.  Для КАЖДОГО NPC ОБЯЗАТЕЛЬНО должны быть указаны ВСЕ требуемые поля: 'id' (СТРОГО в формате UUID), 'name', 'type', 'description', 'personality', 'background', 'intentions', 'isHostile'. Убедись, что КАЖДЫЙ NPC в массиве 'initialNpcs' имеет поле 'id' в СТРОГОМ формате UUID (например, 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx').\n5.  Поле 'type' для NPC может принимать ТОЛЬКО ОДНО из следующих значений: 'human', 'animal', 'monster', 'other'. НЕ ИСПОЛЬЗУЙ другие типы, такие как 'elf', 'dwarf', 'orc' и т.д.`;
+
+  try {
+    const generatedData = await generateStructured(prompt, {
+      schema: WorldGenerationSchema,
+      history: [], // No history for initial generation
+      jsonSchema: {
+        name: "WorldGeneration",
+        description: "Генерация начальных данных мира и NPC для RPG",
+        schema: WorldGenerationSchema
+      }
+    });
+
+    console.log("✅ Мир и персонажи успешно сгенерированы!");
+
+    // Преобразуем initialNpcs в полный тип NPC с добавлением стандартных значений
+    const fullNpcs: NPC[] = generatedData.initialNpcs.map(npcData => ({
+      ...npcData,
+      inventory: [], // Пустой инвентарь по умолчанию
+      health: npcData.type === 'monster' ? 50 : 100, // У монстров меньше здоровья?
+      maxHealth: npcData.type === 'monster' ? 50 : 100,
+    }));
+
+    return {
+      world: {
+        name: generatedData.world.name,
+        description: generatedData.world.description,
+        rules: "Правила мира будут раскрываться по ходу игры.", // Placeholder
+        setting: generatedData.world.setting + "\n\nИстория:\n" + generatedData.world.history, // Combine setting & history
+        mainStoryline: generatedData.world.mainStoryline
+      },
+      npcs: fullNpcs // Возвращаем полный массив NPC
+    };
+
+  } catch (error) {
+    console.error("❌ Ошибка при генерации мира (после всех попыток):");
+    console.error(error);
+    // Re-throw the error to halt execution instead of using defaults
+    throw new Error(`Не удалось сгенерировать мир и NPC после всех попыток: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-// Вспомогательные функции
-async function displayGameState(state: GameState) {
-  // Отображаем заголовок с информацией
-  console.log("\n" + "=".repeat(70));
-  
-  // Информация о локации, времени и дате
-  const timeStr = `${state.time.hour.toString().padStart(2, '0')}:${state.time.minute.toString().padStart(2, '0')}`;
-  console.log(`📍 ${state.location.name} | 🕒 ${timeStr} (${state.time.dayTime}) | 📅 День ${state.time.day}, Месяц ${state.time.month}, Год ${state.time.year}`);
-  
-  // Информация о погоде
-  console.log(`🌤️ Погода: ${state.weather.current}, ${state.weather.temperature}°C`);
-  
-  // Информация о здоровье и золоте
-  const healthPercent = (state.player.health / state.player.maxHealth) * 100;
-  let healthEmoji = '❤️'; // Обычное сердце
-  
-  // Выбираем эмодзи в зависимости от уровня здоровья
-  if (healthPercent <= 25) {
-    healthEmoji = '💔'; // Сломанное сердце
-  } else if (healthPercent <= 50) {
-    healthEmoji = '🖤'; // Оранжевое сердце
-  }
-  
-  console.log(`${healthEmoji} Здоровье: ${state.player.health}/${state.player.maxHealth} | 💰 Золото: ${state.player.gold}`);
-  console.log("=".repeat(70));
-  
-  // Основное описание сцены
-  console.log(`\n${state.scene}\n`);
-  
-  // Персонажи рядом, если есть
+// Function to display the generated NPCs (for debugging/info)
+async function displayGeneratedNPCs(npcs: NPC[]) {
+  console.log("\n🧑‍🤝‍🧑 Стартовые NPC (для информации): 🧑‍🤝‍🧑");
+  npcs.forEach((npc, index) => {
+    console.log(formatInBox(`Имя: ${npc.name} (${npc.type})\nОписание: ${npc.description}\nХарактер: ${npc.personality}\nПредыстория: ${npc.background}\nНамерения: ${npc.intentions}\nВраждебность: ${npc.isHostile}`, 70, `Стартовый NPC ${index + 1}`));
+  });
+}
+
+// Function to update game time
+function updateTime(time: GameTime, minutesPassed: number): GameTime {
+  const newTotalMinutes = time.totalMinutes + minutesPassed;
+  const newMinute = newTotalMinutes % 60;
+  const totalHours = Math.floor(newTotalMinutes / 60);
+  const newHour = totalHours % 24;
+  const totalDays = Math.floor(totalHours / 24);
+  const newDay = (time.day + totalDays - 1) % 30 + 1; // Примерный месяц 30 дней
+  const totalMonths = Math.floor((time.day + totalDays - 1) / 30);
+  const newMonth = (time.month + totalMonths - 1) % 12 + 1;
+  const newYear = time.year + Math.floor((time.month + totalMonths - 1) / 12);
+
+  let newDayTime: GameState['time']['dayTime'];
+  if (newHour >= 6 && newHour < 12) newDayTime = "утро";
+  else if (newHour >= 12 && newHour < 18) newDayTime = "день";
+  else if (newHour >= 18 && newHour < 24) newDayTime = "вечер";
+  else newDayTime = "ночь";
+
+  return {
+    minute: newMinute,
+    hour: newHour,
+    day: newDay,
+    month: newMonth,
+    year: newYear,
+    dayTime: newDayTime,
+    totalMinutes: newTotalMinutes,
+  };
+}
+
+// Function to display the current game state
+function displayGameState(state: GameState) {
+  console.log("\n============================================================");
+  console.log(formatInBox(state.scene, 70, `📍 ${state.location.name} (${state.location.terrain}) | ${state.time.dayTime}, ${state.time.hour.toString().padStart(2, '0')}:${state.time.minute.toString().padStart(2, '0')} | ${state.weather.current}, ${state.weather.temperature}°C`));
+
+  // --- Display NPCs --- 
   if (state.npcsPresent && state.npcsPresent.length > 0) {
-    console.log("🧑 Персонажи рядом:");
-    state.npcsPresent.forEach(npc => {
-      // Выбираем эмодзи в зависимости от типа NPC
-      let npcEmoji = '🚹'; // Человек по умолчанию
-      if (npc.type === 'animal') {
-        npcEmoji = '🐾'; // Животное
-      } else if (npc.type === 'monster') {
-        npcEmoji = '👾'; // Монстр
-      } else if (npc.type === 'other') {
-        npcEmoji = '👻'; // Призрак/другое
-      }
-      
-      // Отображаем информацию о NPC
-      console.log(`  ${npcEmoji} ${npc.name}: ${npc.description} ${npc.isHostile ? '🔥 (Враждебен)' : ''}`);
-    });
-    console.log("");
+      console.log("\n🧑‍🤝‍🧑 Присутствуют:")
+      state.npcsPresent.forEach(npc => {
+          console.log(formatInBox(`${npc.name} (${npc.type}) - ${npc.description}`, 60, npc.isHostile ? "🔥 Враждебный" : "👤 Персонаж"));
+      });
   }
-  
-  // Варианты действий
-  console.log("Варианты действий:");
-  state.options.forEach((option, index) => {
-    // Собираем дополнительную информацию для отображения
-    let additionalInfo = [];
-    
-    // Если есть информация о затраченном времени, показываем её
-    if (option.timeChange) {
-      additionalInfo.push(`⏱️ ${option.timeChange} мин`);
-    }
-    
-    // Показываем информацию о золоте, если она есть
-    if (option.goldChange) {
-      if (option.goldChange > 0) {
-        additionalInfo.push(`💰 +${option.goldChange} золота`);
-      } else if (option.goldChange < 0) {
-        additionalInfo.push(`💰 ${option.goldChange} золота`);
-      }
-    } else if (option.text.toLowerCase().includes('купить') || 
-              option.text.toLowerCase().includes('приобрести') || 
-              option.text.toLowerCase().includes('заплатить')) {
-      // Если в тексте есть слово о покупке, но нет точной суммы
-      additionalInfo.push('💰 Требует золота');
-    } else if (option.text.toLowerCase().includes('продать') || 
-               option.text.toLowerCase().includes('награда') || 
-               option.text.toLowerCase().includes('оплата')) {
-      // Если в тексте есть упоминание о продаже/награде
-      additionalInfo.push('💰 Можно получить золото');
-    }
-    
-    // Форматируем и выводим опцию
-    const infoString = additionalInfo.length > 0 ? `[${additionalInfo.join(', ')}]` : '';
-    console.log(`${index + 1}. ${option.text} ${infoString}`);
-  });
-  
-  // Добавляем возможность открыть инвентарь
-  console.log(`${state.options.length + 1}. 🎒 Открыть инвентарь`);
-}
+  // --- End Display NPCs ---
 
-// Функция для работы с инвентарём
-async function showInventory(player: Player) {
-  console.log("\n🎒 Инвентарь:\n");
-  
-  if (player.inventory.length === 0) {
-    console.log("  Инвентарь пуст.\n");
-    return;
-  }
-  
-  // Показываем список предметов
-  player.inventory.forEach((item, index) => {
-    // Выбираем эмодзи в зависимости от типа предмета
-    let itemEmoji = '📜'; // свиток по умолчанию
-    if (item.type === 'weapon') {
-      itemEmoji = '⚔️';
-    } else if (item.type === 'armor') {
-      itemEmoji = '🛡️';
-    } else if (item.type === 'potion') {
-      itemEmoji = '🧉';
-    } else if (item.type === 'key') {
-      itemEmoji = '🗝️';
-    }
-    
-    const quantity = item.quantity > 1 ? `(${item.quantity})` : '';
-    console.log(`  ${index + 1}. ${itemEmoji} ${item.name} ${quantity}`);
+  console.log("\n--- Что вы будете делать? ---");
+  state.options.forEach(option => {
+    console.log(`${option.id}. ${option.text}`);
   });
-  
-  console.log("\nВыберите предмет для подробной информации или действия, или 0 для выхода:");
-  
-  const response = await askQuestion("Выбор: ");
-  const itemIndex = parseInt(response) - 1;
-  
-  if (itemIndex === -1 || isNaN(itemIndex) || response === '0') {
-    return; // Выход из инвентаря
-  }
-  
-  if (itemIndex >= 0 && itemIndex < player.inventory.length) {
-    const item = player.inventory[itemIndex];
-    
-    // Показываем подробности о предмете
-    console.log(`\nПодробно о предмете '${item.name}':\n`);
-    console.log(`Описание: ${item.description}`);
-    
-    // Показываем свойства предмета, если они есть
-    if (item.properties) {
-      if (item.properties.damage) {
-        console.log(`Урон: ${item.properties.damage}`);
-      }
-      if (item.properties.defense) {
-        console.log(`Защита: ${item.properties.defense}`);
-      }
-      if (item.properties.healing) {
-        console.log(`Лечение: ${item.properties.healing}`);
-      }
-      if (item.properties.effects && item.properties.effects.length > 0) {
-        console.log(`Эффекты: ${item.properties.effects.join(', ')}`);
-      }
-    }
-    
-    // Предлагаем действия с предметом
-    console.log("\nДействия:");
-    console.log("1. Использовать");
-    console.log("2. Выбросить");
-    console.log("0. Назад");
-    
-    const action = await askQuestion("Выбор: ");
-    
-    if (action === '1') {
-      // Используем предмет
-      console.log(`Вы используете ${item.name}.`);
-      
-      // Обрабатываем разные типы предметов
-      if (item.type === 'potion' && item.properties?.healing) {
-        const healAmount = item.properties.healing;
-        player.health = Math.min(player.health + healAmount, player.maxHealth);
-        console.log(`Вы выпили зелье и восстановили ${healAmount} здоровья!`);
-        
-        // Уменьшаем количество предмета или удаляем его
-        item.quantity--;
-        if (item.quantity <= 0) {
-          player.inventory.splice(itemIndex, 1);
-        }
-      }
-      // Другие типы предметов можно обработать аналогично
-    } else if (action === '2') {
-      // Выбрасываем предмет
-      const confirmDrop = await askQuestion(`Вы уверены, что хотите выбросить ${item.name}? (да/нет): `);
-      
-      if (confirmDrop.toLowerCase() === 'да') {
-        player.inventory.splice(itemIndex, 1);
-        console.log(`Вы выбросили ${item.name}.`);
-      }
-    }
-    
-    // Показываем инвентарь снова
-    await showInventory(player);
-  } else {
-    console.log("Неверный выбор, попробуйте еще раз.");
-    await showInventory(player);
-  }
-}
-
-async function askQuestion(question: string): Promise<string> {
-  console.log(question);
-  return new Promise((resolve) => {
-    process.stdin.once("data", (data) => {
-      resolve(data.toString().trim());
-    });
-  });
+  console.log("------------------------------");
 }
 
 // Основная функция игры
-async function startDndGame() {
-  console.log("🎲 Добро пожаловать в мини D&D приключение! 🏰");
+async function startGameLoop() {
+  console.log("\n🎲 Добро пожаловать в текстовое RPG приключение! 🎲");
 
-  // Создаем начальную локацию
-  const initialLocation = {
-    name: "Город Новомир",
-    description: "Большой торговый город на пересечении древних торговых путей",
-    terrain: "городская местность"
-  };
-  
-  // Создаем историю игры
-  const gameHistory: GameHistory = [];
-  
-  // Начальная сцена
-  const startPrompt = `
-Создай начальную сцену для фэнтези приключения в мире ${gameWorld.name}.
+  let generatedWorld: GameWorld;
+  let generatedNpcs: NPC[] = []; // Initialize to avoid potential undefined issues
 
-Описание мира: ${gameWorld.description}
-Правила: ${gameWorld.rules}
-Сеттинг: ${gameWorld.setting}
-Основной сюжет: ${gameWorld.mainStoryline}
-
-Главный герой: ${initialPlayer.name}, ${initialPlayer.gender}, ${initialPlayer.age} лет. ${initialPlayer.background}
-
-Текущая локация: ${initialLocation.name}, ${initialLocation.description}
-Погода: ${initialWeather.current}, ${initialWeather.temperature}°C
-Время: ${initialTime.hour}:${initialTime.minute.toString().padStart(2, '0')}, ${initialTime.dayTime}, День ${initialTime.day}, Месяц ${initialTime.month}, Год ${initialTime.year}
-
-Опиши подробную сцену и предложи 3-4 варианта действий. Для каждого действия укажи, сколько времени (в минутах) оно займет (от 5 до 100 минут).
-Могут ли встретиться новые персонажи? Если да, опиши их подробно (личность, намерения, предыстория).
-`;
-
-  let gameState: GameState;
-  
   try {
-    gameState = await generateStructured<GameState>(
-      startPrompt,
-      {
-        schema: GameStateSchema,
-        jsonSchema: {
-          name: "GameState",
-          description: "Расширенное состояние игры для D&D приключения",
-          schema: {
-            type: "object",
-            properties: {
-              scene: { type: "string", description: "Описание текущей сцены и окружения" },
-              location: {
-                type: "object",
-                properties: {
-                  name: { type: "string", description: "Название локации" },
-                  description: { type: "string", description: "Описание локации" },
-                  terrain: { type: "string", description: "Тип местности" }
-                },
-                required: ["name", "description", "terrain"]
-              },
-              options: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    id: { type: "string", description: "Уникальный идентификатор варианта" },
-                    text: { type: "string", description: "Текст варианта действия" },
-                    consequence: { type: "string", description: "Описание следствия выбора" },
-                    timeChange: { type: "integer", description: "Время в минутах, которое займет действие (5-100)" }
-                  },
-                  required: ["id", "text", "consequence"]
-                }
-              }
-            },
-            required: ["scene", "options"]
-          }
-        }
-      }
-    );
-      
-    // Добавляем недостающие поля, если их нет
-    if (!gameState.location) {
-      gameState.location = initialLocation;
-    }
-    if (!gameState.weather) {
-      gameState.weather = initialWeather;
-    }
-    if (!gameState.time) {
-      gameState.time = initialTime;
-    }
-    if (!gameState.player) {
-      gameState.player = initialPlayer;
-    }
-    if (!gameState.world) {
-      gameState.world = gameWorld;
-    }
-    if (!gameState.npcsPresent) {
-      gameState.npcsPresent = [];
-    }
-      
-    // Проверяем здоровье игрока
-    if (gameState.player.health <= 0) {
-      console.log("\n" + "=".repeat(70));
-      console.log("Ваш персонаж погиб. Игра окончена.");
-      console.log("=".repeat(70) + "\n");
-      isGameOver = true;
-      return;
-    }
+    // --- Этап 1: Генерация мира и стартовых NPC ---
+    console.log("--- Этап 1: Генерация мира и стартовых NPC ---"); // Added log
+    ({ world: generatedWorld, npcs: generatedNpcs } = await generateInitialWorldAndNPCs());
+    await displayGeneratedNPCs(generatedNpcs); // Display for info
   } catch (error) {
-    console.error("\nОшибка при генерации начальной сцены:", error);
-    return;
+    console.error("💥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать мир и NPC. Завершение игры.");
+    console.error(error); // Log the specific error re-thrown from generateInitialWorldAndNPCs
+    rl.close();
+    process.exit(1); // Exit immediately if generation fails
   }
 
-  // Показываем начальную сцену
-  await displayGameState(gameState);
+  // --- Этап 2: Инициализация состояния игры ---
+  console.log("--- Этап 2: Инициализация состояния игры ---"); // Added log
+  const initialLocation = {
+    name: "Лесная поляна",
+    description: "Вы находитесь на небольшой поляне, окруженной густым лесом. Солнечные лучи едва пробиваются сквозь кроны деревьев. В центре поляны видны остатки старого костра.",
+    terrain: "Лес"
+  };
 
-  // Основной игровой цикл
+  let gameState: GameState = {
+    scene: "Вы очнулись на лесной поляне, не помня, как сюда попали. Голова немного гудит.",
+    location: initialLocation,
+    weather: initialWeather,
+    time: initialTime,
+    player: initialPlayer,
+    world: generatedWorld,
+    npcsPresent: generatedNpcs.slice(0, 1), // Поместим первого сгенерированного NPC в стартовую локацию
+    options: [
+      { id: "1", text: "Осмотреться внимательнее", consequence: "Вы осматриваете поляну и ближайшие деревья.", timeChange: 10 },
+      { id: "2", text: "Проверить свое состояние и снаряжение", consequence: "Вы проверяете себя на наличие ран и осматриваете свое снаряжение.", timeChange: 5 },
+      { id: "3", text: "Попытаться найти тропу", consequence: "Вы решаете поискать выход с поляны.", timeChange: 20 }
+    ]
+  };
+
+  // Добавляем начальное состояние в историю для AI
+  history.push({ role: "system", content: `Начальное состояние игры: Игрок ${gameState.player.name} находится в локации '${gameState.location.name}'. Мир: ${gameState.world.name}. ${gameState.world.description}. Погода: ${gameState.weather.current}. Время: ${gameState.time.dayTime}. Сцена: ${gameState.scene}` });
+  if (gameState.npcsPresent.length > 0) {
+    history.push({ role: "system", content: `В локации присутствуют NPC: ${gameState.npcsPresent.map(npc => npc.name).join(', ')}.` });
+  }
+
+  // --- Этап 3: Основной цикл игры --- 
   while (!isGameOver) {
-    try {
-      // Запрашиваем выбор у игрока
-      const input = await askQuestion("Ваш выбор (введите номер): ");
-      const choiceNum = parseInt(input);
-      
-      if (isNaN(choiceNum)) {
-        console.log("Неверный ввод. Пожалуйста, введите число.");
-        continue;
-      }
-      
-      // Проверяем, выбрал ли игрок действие или инвентарь
-      if (choiceNum === gameState.options.length + 1) {
-        // Открыть инвентарь
-        await showInventory(gameState.player);
-        continue;
-      }
-      
-      if (choiceNum < 1 || choiceNum > gameState.options.length) {
-        console.log(`Пожалуйста, выберите число от 1 до ${gameState.options.length + 1}.`);
-        continue;
-      }
-      
-      const choice = gameState.options[choiceNum - 1];
-      
-      // Добавляем выбор в историю
-      gameHistory.push({ role: "user", content: choice.text });
-      
-      // Обновляем время в игре, если действие занимает время
-      if (choice.timeChange) {
-        await updateGameTime(gameState, choice.timeChange);
-      } else {
-        // Если время не указано, по умолчанию 5 минут
-        await updateGameTime(gameState, 5);
-      }
-      
-      // Обрабатываем изменение золота, если оно указано
-      if (choice.goldChange) {
-        gameState.player.gold += choice.goldChange;
-        if (choice.goldChange > 0) {
-          console.log(`Вы получили ${choice.goldChange} золота.`);
-        } else if (choice.goldChange < 0) {
-          console.log(`Вы потратили ${Math.abs(choice.goldChange)} золота.`);
-        }
-      }
-      
-      // Показываем результат выбора
-      console.log("\n" + "-".repeat(70));
-      console.log(`Вы выбрали: ${choice.text}`);
-      console.log(choice.consequence);
-      console.log("-".repeat(70) + "\n");
-      
-      // Добавляем результат выбора в историю
-      gameHistory.push({ role: "assistant", content: choice.consequence });
-      
-      // Формируем промпт для следующей сцены
-      const nextScenePrompt = `
-Игрок выбрал: ${choice.text}
-Последствия: ${choice.consequence}
+    displayGameState(gameState);
 
-Текущая локация: ${gameState.location.name}, ${gameState.location.description}
-Текущее время: ${gameState.time.hour}:${gameState.time.minute.toString().padStart(2, '0')}, ${gameState.time.dayTime}, День ${gameState.time.day}, Месяц ${gameState.time.month}, Год ${gameState.time.year}
+    const answer = await rl.question('Ваш выбор (введите номер): ');
+    const choice = answer.trim();
+    const selectedOption = gameState.options.find(opt => opt.id === choice);
+
+    if (!selectedOption) {
+      console.log("Неверный выбор. Пожалуйста, введите номер одного из вариантов.");
+      continue;
+    }
+
+    // Добавляем действие игрока в историю
+    history.push({ role: "user", content: `Игрок выбирает: ${selectedOption.text}` });
+
+    // --- D20 Roll Example --- 
+    const roll = rollD20();
+    console.log(`\n굴 Проверка D20... Вы выбросили: ${roll} 🎲`);
+    let successLevel = "";
+    if (roll >= 15) successLevel = "(Большой успех!) ";
+    else if (roll >= 10) successLevel = "(Успех!) ";
+    else if (roll >= 5) successLevel = "(Частичный успех / Неудача с последствиями) ";
+    else successLevel = "(Провал!) ";
+    // -----------------------
+
+    console.log(`\n⏳ Выполняется действие: ${selectedOption.text}...`);
+
+    // Обновляем время ДО вызова AI, если оно указано
+    if (selectedOption.timeChange) {
+        gameState.time = updateTime(gameState.time, selectedOption.timeChange);
+        console.log(`(Прошло ${selectedOption.timeChange} минут)`);
+    }
+    if (selectedOption.goldChange) {
+        gameState.player.gold += selectedOption.goldChange;
+        console.log(`(${selectedOption.goldChange > 0 ? '+' : ''}${selectedOption.goldChange} золота)`);
+    }
+
+    // --- AI Interaction --- 
+    const prompt = `Предыдущая история:
+${history.map(h => `${h.role}: ${h.content}`).join('\n')}
+
+Текущее состояние:
+Локация: ${gameState.location.name} (${gameState.location.description})
 Погода: ${gameState.weather.current}, ${gameState.weather.temperature}°C
-Золото игрока: ${gameState.player.gold} монет
-Здоровье игрока: ${gameState.player.health}/${gameState.player.maxHealth}
-Инвентарь: ${gameState.player.inventory.map(item => item.name).join(', ') || 'пусто'}
+Время: ${gameState.time.dayTime}, ${gameState.time.hour}:${gameState.time.minute}
+Игрок: ${gameState.player.name} (Здоровье: ${gameState.player.health}/${gameState.player.maxHealth})
+NPC в локации: ${gameState.npcsPresent.map(n => `${n.name} (${n.description})`).join(', ') || 'Нет'}
 
-Создай новую сцену, описывающую что произошло после выбора игрока. Предложи 3-4 новых варианта действий с указанием времени, которое они займут (в минутах), и укажи изменение золота, если оно есть.
+Действие игрока: ${selectedOption.text}
+Результат броска D20: ${roll} ${successLevel}
 
-Требования:
-1. В тексте сцены используй время ${gameState.time.hour}:${gameState.time.minute.toString().padStart(2, '0')}, а не другое.
-2. Если действие подразумевает трату или получение золота, указывай это в параметре goldChange.
-3. При необходимости измени локацию, добавь или удали NPC, обнови инвентарь или здоровье персонажа.
-`;
+Опиши результат действия игрока, учитывая бросок D20 (${successLevel}). Обнови сцену, локацию (если изменилась), погоду, время (если не было timeChange в опции), состояние игрока (здоровье, золото, инвентарь), состояние NPC (если они взаимодействовали) и предоставь 3-5 новых осмысленных вариантов действий для игрока.
 
-      // Генерируем новую сцену
-      console.log("Генерация следующей сцены...");
-      
-      try {
-        const nextScene = await generateStructured<GameState>(
-          nextScenePrompt,
-          {
-            schema: GameStateSchema,
-            jsonSchema: {
-              name: "GameState",
-              description: "Расширенное состояние игры для D&D приключения",
-              schema: {
-                type: "object",
-                properties: {
-                  scene: { type: "string" },
-                  options: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        id: { type: "string" },
-                        text: { type: "string" },
-                        consequence: { type: "string" },
-                        timeChange: { type: "number" }
-                      },
-                      required: ["id", "text", "consequence"]
-                    }
-                  }
-                },
-                required: ["scene", "options"]
-              }
-            }
-          }
-        );
-        
-        // Добавляем недостающие поля, если их нет
-        if (!nextScene.location) {
-          nextScene.location = gameState.location;
+Важно: Если в локации присутствуют NPC (${gameState.npcsPresent.map(n => n.name).join(', ') || 'Нет'}), ОБЯЗАТЕЛЬНО включи варианты для взаимодействия с ними (например, 'Поговорить с [Имя NPC]', 'Осмотреть [Имя NPC]', 'Атаковать [Имя NPC]' если враждебен или уместно).
+
+Учитывай мир (${gameState.world.name}), его правила и сюжет (${gameState.world.mainStoryline}). Ответ должен строго соответствовать JSON schema GameStateSchema. Не включай описание мира в ответ.`;
+
+    try {
+      const aiResponse = await generateStructured(prompt, {
+        schema: GameStateSchema,
+        history: history, // Передаем текущую историю
+        jsonSchema: {
+          name: "GameStateUpdate",
+          description: "Обновление состояния игры на основе действия игрока",
+          schema: GameStateSchema
         }
-        if (!nextScene.weather) {
-          nextScene.weather = gameState.weather;
-        }
-        if (!nextScene.time) {
-          nextScene.time = gameState.time;
-        }
-        if (!nextScene.player) {
-          nextScene.player = gameState.player;
-        }
-        if (!nextScene.world) {
-          nextScene.world = gameState.world;
-        }
-        if (!nextScene.npcsPresent) {
-          nextScene.npcsPresent = gameState.npcsPresent;
-        }
-        
-        // Обновляем текущую сцену
-        Object.assign(gameState, nextScene);
-        
-        // Проверяем здоровье игрока
-        if (gameState.player.health <= 0) {
-          console.log("\n" + "=".repeat(70));
-          console.log("Ваш персонаж погиб. Игра окончена.");
-          console.log("=".repeat(70) + "\n");
-          isGameOver = true;
-          break;
-        }
-        
-        // Отображаем обновленную сцену
-        await displayGameState(gameState);
-      } catch (error) {
-        console.error("\nОшибка при генерации следующей сцены:", error);
-        console.log("Попробуем еще раз...");
+      });
+
+      // Обновляем состояние игры данными от AI
+      // Важно: обновляем только те поля, которые AI может изменить
+      gameState.scene = aiResponse.scene;
+      gameState.location = aiResponse.location ?? gameState.location;
+      gameState.weather = aiResponse.weather ?? gameState.weather;
+      gameState.time = aiResponse.time ?? gameState.time; // AI может сам решить, сколько времени прошло
+      gameState.player = aiResponse.player ?? gameState.player;
+      gameState.npcsPresent = aiResponse.npcsPresent ?? gameState.npcsPresent;
+      gameState.options = aiResponse.options;
+
+      // Добавляем ответ AI в историю
+      history.push({ role: "assistant", content: aiResponse.scene }); // Записываем основную сцену как ответ
+
+      // Проверка на конец игры (например, по состоянию здоровья)
+      if (gameState.player.health <= 0) {
+        console.log(formatInBox("💀 Ваше здоровье иссякло... Игра окончена. 💀", 70, "Конец игры"));
+        isGameOver = true;
       }
+      // TODO: Добавить другие условия конца игры (например, выполнение цели)
+
     } catch (error) {
-      console.error("\nОшибка в игровом цикле:", error);
+      console.error("❌ Ошибка при получении ответа от AI:", error);
+      console.log("Произошла ошибка. Попробуйте выбрать другое действие.");
+      // Откатываем историю, если AI не ответил
+      history.pop(); // Убираем действие игрока
     }
   }
+
+  rl.close();
+  console.log("\n👋 Спасибо за игру!");
 }
 
 // Запускаем игру
-startDndGame().catch(console.error);
+startGameLoop().catch(console.error);

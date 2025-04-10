@@ -502,32 +502,23 @@ export const generateStructured = async <T extends z.ZodType>(
     params = {}
   } = options;
 
-  // Создаем дополнительные инструкции для модели
+  // Создаем КРАЙНЕ СТРОГИЕ инструкции для модели
   const schemaDescription = `
-Ты должен вернуть данные JSON с конкретными значениями, а НЕ СХЕМУ.
-НЕ ВОЗВРАЩАЙ ОПИСАНИЕ СХЕМЫ, возвращай только заполненный данными JSON.
+КРАЙНЕ ВАЖНО: Твой ответ ДОЛЖЕН быть ТОЛЬКО и ИСКЛЮЧИТЕЛЬНО валидным JSON объектом, соответствующим предоставленной ниже структуре.
+НЕ включай НИКАКОГО дополнительного текста, объяснений, комментариев, markdown форматирования, или чего-либо еще ДО или ПОСЛЕ JSON объекта.
+НЕ возвращай строку, содержащую JSON. Ответ должен быть непосредственно самим JSON объектом.
+НЕ возвращай null или другие типы данных. ТОЛЬКО JSON ОБЪЕКТ.
 
-Пример схемы:
-{
-  "type": "object",
-  "properties": { ... }
-}
-
-ПРИМЕР ПРАВИЛЬНОГО ОТВЕТА (с реальными данными):
-{
-  "scene": "Описание сцены...",
-  "options": [
-    { "id": "option1", "text": "...", "consequence": "..." },
-    { "id": "option2", "text": "...", "consequence": "..." }
-  ]
-}
-
-Тип данных и структура:
-\`\`\`json
+Структура JSON, которую ты должен вернуть (ЗАПОЛНЕННУЮ ДАННЫМИ, а НЕ саму схему):
 ${JSON.stringify(jsonSchema.schema, null, 2)}
-\`\`\`
 
-Важно: верни ТОЛЬКО JSON объект с данными, без схемы, без типов, без описаний полей.`;
+Пример того, как ДОЛЖЕН выглядеть твой ответ (с реальными данными):
+{
+  "world": { "name": "Название мира", "description": "...", /* ... другие поля */ },
+  "npcs": [ { "id": "...", "name": "Имя NPC", /* ... другие поля */ } ]
+}
+
+ЕЩЕ РАЗ: ВЕРНИ ТОЛЬКО RAW JSON ОБЪЕКТ И НИЧЕГО БОЛЕЕ.`;
 
   // Формируем сообщения для запроса
   const messages: ChatCompletionMessageParam[] = [
@@ -603,51 +594,32 @@ ${JSON.stringify(jsonSchema.schema, null, 2)}
       try {
         logger.info(`Попытка генерации структурированного ответа #${attempt}`);
         
-        // Создаем параметры запроса для текущей попытки
-        const currentMessages = [...messages];
+        const currentMessages = [...messages]; // Используем копию для каждой попытки
 
         // Если это не первая попытка, добавляем инструкцию об ошибке
         if (attempt > 1 && lastError) {
           currentMessages.push({
             role: "user",
-            content: `Предыдущая попытка не удалась. Ошибка: ${lastError.message}. Пожалуйста, верни ТОЛЬКО JSON с данными, а не схему JSON.`
+            content: `Предыдущая попытка не удалась. Ошибка: ${lastError.message}. Пожалуйста, верни ТОЛЬКО JSON с данными, соответствующий схеме.`
           });
         }
-        
+
         // Проверим наличие API ключа
         if (!process.env.OPENROUTER_API_KEY) {
           logger.error('Отсутствует OPENROUTER_API_KEY. Проверьте файл .env');
           throw new Error('Отсутствует API ключ. Проверьте конфигурацию');
         }
 
-        // Изменяем модель на более стабильную для работы с JSON
-        requestParams.model = process.env.OPENROUTER_MODEL || "google/gemini-2.5-pro-exp-03-25:free";
-        
-        // Добавляем дополнительные параметры для улучшения стабильности
-        requestParams.max_tokens = 1024; // Ограничиваем размер ответа
-        requestParams.temperature = 0.5; // Сниженная температура для более предсказуемых результатов
-        requestParams.timeout = 30000; // Таймаут 30 секунд
-        
-        // Добавляем поддержку structured outputs согласно документации OpenRouter
-        requestParams.response_format = {
-          type: "json_schema",
-          json_schema: {
-            name: "structuredResponse",
-            strict: true,
-            schema: jsonSchema.schema
-          }
-        }
-        
-        // Логируем обновленные параметры запроса
+        // Логируем параметры запроса (используем исходные requestParams и актуальные currentMessages)
         logger.debug(`Отправка запроса к API (модель: ${requestParams.model}, сообщений: ${currentMessages.length})`);
         
         // Выполняем запрос к API с обработкой возможных сетевых ошибок
         let response;
         try {
           response = await openai.chat.completions.create({
-            ...requestParams,
+            ...requestParams, // Используем исходные параметры (включая model, temp и т.д. из options)
             stream: false,
-            messages: currentMessages,
+            messages: currentMessages, // Передаем актуальные сообщения для этой попытки
           });
           
           logger.debug(`Ответ получен, статус запроса: ${response ? 'успешно' : 'ошибка'}`);
@@ -667,56 +639,41 @@ ${JSON.stringify(jsonSchema.schema, null, 2)}
           throw new Error('Пустой ответ от API: отсутствует сообщение');
         }
         
-        const content = response.choices[0].message.content || "";
-        logger.debug(`Получен ответ от API (${content.length} байт)`);
-      
-        // Ищем JSON в ответе с помощью регулярного выражения
-        const jsonRegex = /```json\s*([\s\S]*?)\s*```|^\s*(\{[\s\S]*\})\s*$/m;
-        const match = content.match(jsonRegex);
-        
-        // Проверяем, что у нас есть совпадение и захваченные группы не пустые
-        let jsonStr = "";
-        if (match) {
-          // Пробуем использовать первую или вторую группу захвата
-          if (match[1]) {
-            jsonStr = match[1];
-          } else if (match[2]) {
-            jsonStr = match[2];
-          }
-        }
-        
-        // Если ничего не нашли в группах захвата, используем весь контент
-        if (!jsonStr) {
-          jsonStr = content;
-        }
-        
-        // Убираем лишние символы и пробелы перед/после JSON
-        jsonStr = jsonStr.trim();
-        
-        // Проверяем, что строка не пуста
-        if (!jsonStr) {
-          throw new Error('Пустой ответ от модели');
-        }
+        const jsonStr = response.choices[0].message.content || ""; // Получаем контент
+        logger.debug(`Получен ответ от API (${jsonStr.length} байт)`);
 
-        // Парсим JSON
-        let parsedData;
+        // --- Добавляем очистку от Markdown --- 
+        let cleanedJsonStr = jsonStr.trim();
+        if (cleanedJsonStr.startsWith('```json')) {
+          cleanedJsonStr = cleanedJsonStr.substring(7); // Убираем ```json
+        }
+        if (cleanedJsonStr.endsWith('```')) {
+          cleanedJsonStr = cleanedJsonStr.substring(0, cleanedJsonStr.length - 3);
+        }
+        cleanedJsonStr = cleanedJsonStr.trim(); // Убираем лишние пробелы/переносы строк
+        // --- Конец очистки --- 
+
+        let parsedData: any;
         try {
-          parsedData = JSON.parse(jsonStr);
-          logger.debug('Успешно распарсили JSON');
+          // --- Используем очищенную строку --- 
+          parsedData = JSON.parse(cleanedJsonStr); 
+          // --- Конец исправления --- 
         } catch (parseError) {
           logger.error('Ошибка парсинга JSON:', parseError);
-          logger.error('Сырой ответ:', jsonStr);
+          // Логируем ОБЕ строки - исходную и очищенную
+          logger.error('Сырой ответ (который не удалось распарсить):', jsonStr);
+          logger.error('Очищенная строка (которую пытались парсить):', cleanedJsonStr);
           throw new Error(`Некорректный JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
         }
         
-        // Проверка, что это не схема, а данные
-        if (parsedData.type === 'object' && parsedData.properties) {
-          logger.warn('Модель вернула схему вместо данных');
-          throw new Error('Модель вернула схему вместо данных');
+        // Проверка, что это не null и объект перед валидацией
+        if (typeof parsedData !== 'object' || parsedData === null) {
+          logger.error('Ошибка: AI вернул не JSON объект:', parsedData);
+          throw new Error(`AI вернул не JSON объект, а: ${typeof parsedData}`);
         }
 
-        // Валидируем и возвращаем типизированный ответ
         try {
+          // Валидация данных по схеме
           const validatedData = schema.parse(parsedData);
           logger.info(`Успешно сгенерирован структурированный ответ (попытка #${attempt})`);
           return validatedData;
